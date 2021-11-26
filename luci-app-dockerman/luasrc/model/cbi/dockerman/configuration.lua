@@ -1,7 +1,10 @@
--- Copyright 2021 Florian Eckert <fe@dev.tdt.de>
--- Licensed to the public under the Apache License 2.0.
+--[[
+LuCI - Lua Configuration Interface
+Copyright 2021 Florian Eckert <fe@dev.tdt.de>
+Copyright 2021 lisaac <lisaac.cn@gmail.com>
+]]--
 
-local uci = require "luci.model.uci"
+local uci = (require "luci.model.uci").cursor()
 
 local m, s, o
 
@@ -9,67 +12,21 @@ m = Map("dockerd",
 	translate("Docker - Configuration"),
 	translate("DockerMan is a simple docker manager client for LuCI"))
 
-s = m:section(NamedSection, "dockerman", "section", translate("Global settings"))
-s:tab("daemon", translate("Docker Daemon"))
-s:tab("ac", translate("Access Control"))
-s:tab("dockerman", translate("DockerMan"))
+if nixio.fs.access("/usr/bin/dockerd") and not m.uci:get_bool("dockerd", "dockerman", "remote_endpoint")  then
+	s = m:section(NamedSection, "globals", "section", translate("Docker Daemon settings"))
 
-o = s:taboption("dockerman", Flag, "remote_endpoint",
-	translate("Remote Endpoint"),
-	translate("Connect to remote endpoint"))
-o.rmempty = false
-
-o = s:taboption("dockerman", Value, "socket_path",
-	translate("Docker Socket Path"))
-o.default = "/var/run/docker.sock"
-o.placeholder = "/var/run/docker.sock"
-o:depends("remote_endpoint", 0)
-
-o = s:taboption("dockerman", Value, "remote_host",
-	translate("Remote Host"),
-	translate("Host or IP Address for the connection to a remote docker instance"))
-o.datatype = "host"
-o.rmempty = false
-o.optional = false
-o.placeholder = "10.1.1.2"
-o:depends("remote_endpoint", 1)
-
-o = s:taboption("dockerman", Value, "remote_port",
-	translate("Remote Port"))
-o.placeholder = "2375"
-o.datatype = "port"
-o.rmempty = false
-o.optional = false
-o:depends("remote_endpoint", 1)
-
--- o = s:taboption("dockerman", Value, "status_path", translate("Action Status Tempfile Path"), translate("Where you want to save the docker status file"))
--- o = s:taboption("dockerman", Flag, "debug", translate("Enable Debug"), translate("For debug, It shows all docker API actions of luci-app-dockerman in Debug Tempfile Path"))
--- o.enabled="true"
--- o.disabled="false"
--- o = s:taboption("dockerman", Value, "debug_path", translate("Debug Tempfile Path"), translate("Where you want to save the debug tempfile"))
-
-if nixio.fs.access("/usr/bin/dockerd") then
-	o = s:taboption("ac", DynamicList, "ac_allowed_interface", translate("Allowed access interfaces"), translate("Which interface(s) can access containers under the bridge network, fill-in Interface Name"))
-	local interfaces = luci.sys and luci.sys.net and luci.sys.net.devices() or {}
-	for i, v in ipairs(interfaces) do
-		o:value(v, v)
-	end
-	o = s:taboption("ac", DynamicList, "ac_allowed_container", translate("Containers allowed to be accessed"), translate("Which container(s) under bridge network can be accessed, even from interfaces that are not allowed, fill-in Container Id or Name"))
-	-- allowed_container.placeholder = "container name_or_id"
-	if containers_list then
-		for i, v in ipairs(containers_list) do
-			if	v.State == "running" and v.NetworkSettings and v.NetworkSettings.Networks and v.NetworkSettings.Networks.bridge and v.NetworkSettings.Networks.bridge.IPAddress then
-				o:value(v.Id:sub(1,12), v.Names[1]:sub(2) .. " | " .. v.NetworkSettings.Networks.bridge.IPAddress)
-			end
+	o = s:option(Flag, "auto_start", translate("Auto start"))
+	o.rmempty = false
+	o.write = function(self, section, value)
+		if value == "1" then
+			luci.util.exec("/etc/init.d/dockerd enable")
+		else
+			luci.util.exec("/etc/init.d/dockerd disable")
 		end
+		m.uci:set("dockerd", "globals", "auto_start", value)
 	end
 
-	o = s:taboption("daemon", Flag, "daemon_ea", translate("Enable"))
-	o.enabled = "true"
-	o.disabled = "false"
-	o.rmempty = true
-
-	o = s:taboption("daemon", Value, "data_root",
+	o = s:option(Value, "data_root",
 		translate("Docker Root Dir"))
 	o.placeholder = "/opt/docker/"
 	o:depends("remote_endpoint", 0)
@@ -81,13 +38,14 @@ if nixio.fs.access("/usr/bin/dockerd") then
 	o.datatype = "ipaddr"
 	o:depends("remote_endpoint", 0)
 
-	o = s:taboption("daemon", DynamicList, "registry_mirrors",
+	o = s:option(DynamicList, "registry_mirrors",
 		translate("Registry Mirrors"),
 		translate("It replaces the daemon registry mirrors with a new set of registry mirrors"))
-	o.placeholder = translate("Example: https://hub-mirror.c.163.com")
+	o:value("https://hub-mirror.c.163.com", "https://hub-mirror.c.163.com")
 	o:depends("remote_endpoint", 0)
+	o.forcewrite = true
 
-	o = s:taboption("daemon", ListValue, "log_level",
+	o = s:option(ListValue, "log_level",
 		translate("Log Level"),
 		translate('Set the logging level'))
 	o:value("debug", translate("Debug"))
@@ -98,52 +56,96 @@ if nixio.fs.access("/usr/bin/dockerd") then
 	o.rmempty = true
 	o:depends("remote_endpoint", 0)
 
-	o = s:taboption("daemon", DynamicList, "hosts",
+	o = s:option(DynamicList, "hosts",
 		translate("Client connection"),
 		translate('Specifies where the Docker daemon will listen for client connections (default: unix:///var/run/docker.sock)'))
-	o.placeholder = translate("Example: tcp://0.0.0.0:2375")
+	o:value("unix:///var/run/docker.sock", "unix:///var/run/docker.sock")
+	o:value("tcp://0.0.0.0:2375", "tcp://0.0.0.0:2375")
 	o.rmempty = true
 	o:depends("remote_endpoint", 0)
-	
-	local daemon_changes = 0
-	m.on_before_save = function(self)
-		local m_changes = m.uci:changes("dockerd")
-		if not m_changes or not m_changes.dockerd or not m_changes.dockerd.dockerman then return end
+end
 
-		if m_changes.dockerd.dockerman.daemon_hosts then
-			m.uci:set("dockerd", "globals", "hosts", m_changes.dockerd.dockerman.daemon_hosts)
-			daemon_changes = 1
+s = m:section(NamedSection, "dockerman", "section", translate("DockerMan settings"))
+s:tab("ac", translate("Access Control"))
+s:tab("dockerman", translate("DockerMan"))
+
+o = s:taboption("dockerman", Flag, "remote_endpoint",
+	translate("Remote Endpoint"),
+	translate("Connect to remote docker endpoint"))
+o.rmempty = false
+o.validate = function(self, value, sid)
+	local res = luci.http.formvaluetable("cbid.dockerd")
+	if res["dockerman.remote_endpoint"] == "1" then
+	 if res["dockerman.remote_port"] and res["dockerman.remote_port"] ~= "" and res["dockerman.remote_host"] and res["dockerman.remote_host"] ~= "" then
+			return 1
+		else
+			return nil, translate("Please input the PORT or HOST IP of remote docker instance!")
 		end
-		if m_changes.dockerd.dockerman.daemon_registry_mirrors then
-			m.uci:set("dockerd", "globals", "registry_mirrors", m_changes.dockerd.dockerman.daemon_registry_mirrors)
-			daemon_changes = 1
+	else
+		if not res["dockerman.socket_path"] then
+			return nil, translate("Please input the SOCKET PATH of docker daemon!")
 		end
-		if m_changes.dockerd.dockerman.daemon_data_root then
-			m.uci:set("dockerd", "globals", "data_root", m_changes.dockerd.dockerman.daemon_data_root)
-			daemon_changes = 1
-		end
-		if m_changes.dockerd.dockerman.daemon_log_level then
-			luci.model.uci.cursor():set("dockerd", "globals", "log_level", m_changes.dockerd.dockerman.daemon_log_level)
-			daemon_changes = 1
-		end
-		if m_changes.dockerd.dockerman.daemon_ea then
-			if m_changes.dockerd.dockerman.daemon_ea == "false" then
-				daemon_changes = -1
-			elseif daemon_changes == 0 then
-				daemon_changes = 1
-			end
+	end
+	return 0
+end
+
+o = s:taboption("dockerman", Value, "socket_path",
+	translate("Docker Socket Path"))
+o.default = "/var/run/docker.sock"
+o.placeholder = "/var/run/docker.sock"
+o:depends("remote_endpoint", 0)
+
+o = s:taboption("dockerman", Value, "remote_host",
+	translate("Remote Host"),
+	translate("Host or IP Address for the connection to a remote docker instance"))
+o.datatype = "host"
+o.placeholder = "10.1.1.2"
+o:depends("remote_endpoint", 1)
+
+o = s:taboption("dockerman", Value, "remote_port",
+	translate("Remote Port"))
+o.placeholder = "2375"
+o.datatype = "port"
+o:depends("remote_endpoint", 1)
+
+-- o = s:taboption("dockerman", Value, "status_path", translate("Action Status Tempfile Path"), translate("Where you want to save the docker status file"))
+-- o = s:taboption("dockerman", Flag, "debug", translate("Enable Debug"), translate("For debug, It shows all docker API actions of luci-app-dockerman in Debug Tempfile Path"))
+-- o.enabled="true"
+-- o.disabled="false"
+-- o = s:taboption("dockerman", Value, "debug_path", translate("Debug Tempfile Path"), translate("Where you want to save the debug tempfile"))
+
+if nixio.fs.access("/usr/bin/dockerd") and not m.uci:get_bool("dockerd", "dockerman", "remote_endpoint")  then
+	o = s:taboption("ac", DynamicList, "ac_allowed_interface", translate("Allowed access interfaces"), translate("Which interface(s) can access containers under the bridge network, fill-in Interface Name"))
+	local interfaces = luci.sys and luci.sys.net and luci.sys.net.devices() or {}
+	for i, v in ipairs(interfaces) do
+		o:value(v, v)
+	end
+	o = s:taboption("ac", DynamicList, "ac_allowed_ports", translate("Ports allowed to be accessed"), translate("Which Port(s) can be accessed, it's not restricted by the Allowed Access interfaces configuration. Use this configuration with caution!"))
+	o.placeholder = "8080/tcp"
+	local docker = require "luci.model.docker"
+	local containers, res, lost_state
+	local dk = docker.new()
+	if dk:_ping().code ~= 200 then
+		lost_state = true
+	else
+		lost_state = false
+		res = dk.containers:list()
+		if res and res.code and res.code < 300 then
+			containers = res.body
 		end
 	end
 
-	m.on_after_commit = function(self)
-		if daemon_changes == 1 then
-			luci.util.exec("/etc/init.d/dockerd enable")
-			luci.util.exec("/etc/init.d/dockerd restart")
-		elseif daemon_changes == -1 then
-			luci.util.exec("/etc/init.d/dockerd stop")
-			luci.util.exec("/etc/init.d/dockerd disable")
+	-- allowed_container.placeholder = "container name_or_id"
+	if containers then
+		for i, v in ipairs(containers) do
+			if	v.State == "running" and v.Ports then
+				for _, port in ipairs(v.Ports) do
+					if port.PublicPort and port.IP and not string.find(port.IP,":")  then
+						o:value(port.PublicPort.."/"..port.Type, v.Names[1]:sub(2) .. " | " .. port.PublicPort .. " | " .. port.Type)
+					end
+				end
+			end
 		end
-		luci.util.exec("/etc/init.d/dockerman start")
 	end
 end
 

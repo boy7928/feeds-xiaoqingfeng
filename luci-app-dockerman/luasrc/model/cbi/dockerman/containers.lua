@@ -7,35 +7,32 @@ local http = require "luci.http"
 local docker = require "luci.model.docker"
 
 local m, s, o
-local images, networks, containers, res
-
-local dk = docker.new()
-res = dk.images:list()
-if res.code <300 then
-	images = res.body
-else
-	return
-end
-
-res = dk.networks:list()
-if res.code <300 then
-	networks = res.body
-else
-	return
-end
-
-res = dk.containers:list({
-	query = {
-		all=true
-	}
-})
-if res.code <300 then
-	containers = res.body
-else
-	return
-end
-
+local images, networks, containers, res, lost_state
 local urlencode = luci.http.protocol and luci.http.protocol.urlencode or luci.util.urlencode
+local dk = docker.new()
+
+if dk:_ping().code ~= 200 then
+	lost_state = true
+else
+	res = dk.images:list()
+	if res and res.code and res.code < 300 then
+		images = res.body
+	end
+
+	res = dk.networks:list()
+	if res and res.code and res.code < 300 then
+		networks = res.body
+	end
+
+	res = dk.containers:list({
+		query = {
+			all = true
+		}
+	})
+	if res and res.code and res.code < 300 then
+		containers = res.body
+	end
+end
 
 function get_containers()
 	local data = {}
@@ -92,7 +89,9 @@ function get_containers()
 				data[index]["_image"] = iv.RepoTags and iv.RepoTags[1] or (iv.RepoDigests[1]:gsub("(.-)@.+", "%1") .. ":&lt;none&gt;")
 			end
 		end
-		data[index]["_id_name"] = '<a href='..luci.dispatcher.build_url("admin/docker/container/"..v.Id)..'  class="dockerman_link" title="'..translate("Container detail")..'">'.. data[index]["_name"] .. "<br><font color='#9f9f9f'>ID: " ..	data[index]["_id"] .. "</font></a><br>Image: " .. (data[index]["_image"] or "&lt;none&gt;")
+		data[index]["_id_name"] = '<a href='..luci.dispatcher.build_url("admin/docker/container/"..v.Id)..'  class="dockerman_link" title="'..translate("Container detail")..'">'.. data[index]["_name"] .. "<br><font color='#9f9f9f'>ID: " ..	data[index]["_id"]
+		.. "</font></a><br>Image: " .. (data[index]["_image"] or "&lt;none&gt;") 
+		.. "<br><font color='#9f9f9f' class='container_size_".. v.Id .."'></font>"
 
 		if type(v.Mounts) == "table" and next(v.Mounts) then
 			for _, v2 in pairs(v.Mounts) do
@@ -125,7 +124,7 @@ function get_containers()
 	return data
 end
 
-local container_list = get_containers()
+local container_list = not lost_state and get_containers() or {}
 
 m = SimpleForm("docker",
 	translate("Docker - Containers"),
@@ -201,7 +200,7 @@ local start_stop_remove = function(m, cmd)
 		for _, cont in ipairs(container_selected) do
 			docker:append_status("Containers: " .. cmd .. " " .. cont .. "...")
 			local res = dk.containers[cmd](dk, {id = cont})
-			if res and res.code >= 300 then
+			if res and res.code and res.code >= 300 then
 				success = false
 				docker:append_status("code:" .. res.code.." ".. (res.body.message and res.body.message or res.message).. "\n")
 			else
@@ -230,6 +229,7 @@ o.forcewrite = true
 o.write = function(self, section)
 	luci.http.redirect(luci.dispatcher.build_url("admin/docker/newcontainer"))
 end
+o.disable = lost_state
 
 o = s:option(Button, "_start")
 o.template = "dockerman/cbi/inlinebutton"
@@ -239,6 +239,7 @@ o.forcewrite = true
 o.write = function(self, section)
 	start_stop_remove(m,"start")
 end
+o.disable = lost_state
 
 o = s:option(Button, "_restart")
 o.template = "dockerman/cbi/inlinebutton"
@@ -248,6 +249,7 @@ o.forcewrite = true
 o.write = function(self, section)
 	start_stop_remove(m,"restart")
 end
+o.disable = lost_state
 
 o = s:option(Button, "_stop")
 o.template = "dockerman/cbi/inlinebutton"
@@ -257,6 +259,7 @@ o.forcewrite = true
 o.write = function(self, section)
 	start_stop_remove(m,"stop")
 end
+o.disable = lost_state
 
 o = s:option(Button, "_kill")
 o.template = "dockerman/cbi/inlinebutton"
@@ -266,6 +269,7 @@ o.forcewrite = true
 o.write = function(self, section)
 	start_stop_remove(m,"kill")
 end
+o.disable = lost_state
 
 o = s:option(Button, "_remove")
 o.template = "dockerman/cbi/inlinebutton"
@@ -275,5 +279,6 @@ o.forcewrite = true
 o.write = function(self, section)
 	start_stop_remove(m, "remove")
 end
+o.disable = lost_state
 
 return m

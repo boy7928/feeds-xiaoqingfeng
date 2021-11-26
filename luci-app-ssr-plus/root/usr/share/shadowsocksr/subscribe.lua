@@ -24,6 +24,8 @@ local proxy = ucic:get_first(name, 'server_subscribe', 'proxy', '0')
 local switch = ucic:get_first(name, 'server_subscribe', 'switch', '1')
 local subscribe_url = ucic:get_first(name, 'server_subscribe', 'subscribe_url', {})
 local filter_words = ucic:get_first(name, 'server_subscribe', 'filter_words', '过期时间/剩余流量')
+local save_words = ucic:get_first(name, 'server_subscribe', 'save_words', '')
+local v2_ss = luci.sys.exec('type -t -p ss-redir sslocal') ~= "" and "ss" or "v2ray"
 local v2_tj = luci.sys.exec('type -t -p trojan') ~= "" and "trojan" or "v2ray"
 local log = function(...)
 	print(os.date("%Y-%m-%d %H:%M:%S ") .. table.concat({...}, " "))
@@ -220,7 +222,8 @@ local function processData(szType, content)
 		local method = userinfo:sub(1, userinfo:find(":") - 1)
 		local password = userinfo:sub(userinfo:find(":") + 1, #userinfo)
 		result.alias = UrlDecode(alias)
-		result.type = "ss"
+		result.type = v2_ss
+		result.password = password
 		result.server = host[1]
 		if host[2]:find("/%?") then
 			local query = split(host[2], "/%?")
@@ -239,29 +242,58 @@ local function processData(szType, content)
 				else
 					result.plugin = plugin_info
 				end
+				-- 部分机场下发的插件名为 simple-obfs，这里应该改为 obfs-local
+				if result.plugin == "simple-obfs" then
+					result.plugin = "obfs-local"
+				end
 			end
 		else
-			result.server_port = host[2]
+			result.server_port = host[2]:gsub("/","")
 		end
-		if checkTabValue(encrypt_methods_ss)[method] then
-			result.encrypt_method_ss = method
-			result.password = password
-		else
+		if not checkTabValue(encrypt_methods_ss)[method] then
 			-- 1202 年了还不支持 SS AEAD 的屑机场
 			result.server = nil
+		elseif v2_ss == "v2ray" then
+			result.v2ray_protocol = "shadowsocks"
+			result.encrypt_method_v2ray_ss = method
+		else
+			result.encrypt_method_ss = method
+		end
+	elseif szType == "sip008" then
+		result.type = v2_ss
+		result.server = content.server
+		result.server_port = content.server_port
+		result.password = content.password
+		result.plugin = content.plugin
+		result.plugin_opts = content.plugin_opts
+		result.alias = content.remarks
+		if not checkTabValue(encrypt_methods_ss)[content.method] then
+			result.server = nil
+		elseif v2_ss == "v2ray" then
+			result.v2ray_protocol = "shadowsocks"
+			result.encrypt_method_v2ray_ss = content.method
+		else
+			result.encrypt_method_ss = content.method
 		end
 	elseif szType == "ssd" then
-		result.type = "ss"
+		result.type = v2_ss
 		result.server = content.server
 		result.server_port = content.port
 		result.password = content.password
-		result.encrypt_method_ss = content.encryption
-		result.plugin = content.plugin
 		result.plugin_opts = content.plugin_options
 		result.alias = "[" .. content.airport .. "] " .. content.remarks
-		if checkTabValue(encrypt_methods_ss)[result.encrypt_method_ss] then
-			-- 1202 年了还不支持 SS AEAD 的屑机场
+		if content.plugin == "simple-obfs" then
+			result.plugin = "obfs-local"
+		else
+			result.plugin = content.plugin
+		end
+		if not checkTabValue(encrypt_methods_ss)[content.encryption] then
 			result.server = nil
+		elseif v2_ss == "v2ray" then
+			result.v2ray_protocol = "shadowsocks"
+			result.encrypt_method_v2ray_ss = content.method
+		else
+			result.encrypt_method_ss = content.method
 		end
 	elseif szType == "trojan" then
 		local idx_sp = 0
@@ -394,12 +426,42 @@ end
 
 local function check_filer(result)
 	do
+		-- 过滤的关键词列表
 		local filter_word = split(filter_words, "/")
+		-- 保留的关键词列表
+		local check_save = false
+		if save_words ~= nil and save_words ~= "" and save_words ~= "NULL" then
+			check_save = true
+		end
+		local save_word = split(save_words, "/")
+
+		-- 检查结果
+		local filter_result = false
+		local save_result = true
+
+		-- 检查是否存在过滤关键词
 		for i, v in pairs(filter_word) do
 			if result.alias:find(v) then
-				-- log('订阅节点关键字过滤:“' .. v ..'” ，该节点被丢弃')
-				return true
+				filter_result = true
 			end
+		end
+
+		-- 检查是否打开了保留关键词检查，并且进行过滤
+		if check_save == true then
+			for i, v in pairs(save_word) do
+				if result.alias:find(v) then
+					save_result = false
+				end
+			end
+		else
+			save_result = false
+		end
+
+		-- 不等时返回
+		if filter_result == true or save_result == true then
+			return true
+		else
+			return false
 		end
 	end
 end
@@ -432,6 +494,12 @@ local execute = function()
 						tinsert(servers, setmetatable(server, {__index = extra}))
 					end
 					nodes = servers
+				-- SS SIP008 直接使用 Json 格式
+				elseif jsonParse(raw) then
+					nodes = jsonParse(raw).servers or jsonParse(raw)
+					if nodes[1].server and nodes[1].method then
+						szType = 'sip008'
+					end
 				else
 					-- ssd 外的格式
 					nodes = split(base64Decode(raw):gsub(" ", "_"), "\n")
@@ -439,7 +507,7 @@ local execute = function()
 				for _, v in ipairs(nodes) do
 					if v then
 						local result
-						if szType == 'ssd' then
+						if szType then
 							result = processData(szType, v)
 						elseif not szType then
 							local node = trim(v)
