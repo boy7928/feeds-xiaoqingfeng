@@ -4,7 +4,7 @@ include $(TOPDIR)/rules.mk
 
 PKG_NAME:=softethervpn5
 PKG_VERSION:=5.02.5180
-PKG_RELEASE:=$(AUTORELEASE)-xiaoqingfengMod
+PKG_RELEASE:=$(AUTORELEASE)
 
 PKG_MAINTAINER:=Andy Walsh <andy.walsh44+github@gmail.com>
 PKG_LICENSE:=GPL-2.0
@@ -133,7 +133,7 @@ endef
 define Package/softethervpn5-server/install
 	$(INSTALL_DIR) $(1)/usr/libexec/softethervpn
 	$(INSTALL_BIN) $(PKG_INSTALL_DIR)/usr/libexec/softether/vpnserver/vpnserver $(1)/usr/libexec/softethervpn/
-	$(INSTALL_DATA) files/vpn_server.config $(1)/usr/libexec/softethervpn/vpn_server.config
+	$(INSTALL_DATA) files/dummy $(1)/usr/libexec/softethervpn/vpn_server.config
 	$(INSTALL_DIR) $(1)/etc/init.d
 	$(INSTALL_BIN) files/vpnserver.init $(1)/etc/init.d/softethervpnserver
 endef
